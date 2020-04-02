@@ -13,6 +13,11 @@ https://developer.apple.com/videos/play/wwdc2019/262
 検証した結果から記載した部分もありますので  
 間違っている部分やもっと良い方法ご存知の方いらっしゃいましたらぜひ教えてください🙇🏻‍♂️  
   
+※　  
+下記の記事にも記載があるように  
+UITableViewの中で利用すると色々問題があるようなので現在検証中です🙇🏻‍♂️  
+https://www.raywenderlich.com/7565482-visually-rich-links-tutorial-for-ios-image-thumbnails  
+  
 # LinkPresentation.frameworkとは？  
   
 iOS13で新しく追加された  
@@ -145,6 +150,16 @@ https://developer.apple.com/documentation/linkpresentation/lperror
 接続が遅すぎてタイムアウトになったり  
 リクエストがキャンセルされた場合に生じます。  
   
+また  
+`LPMetadataProvider`には  
+タイムアウトの時間を設定することもできます。  
+デフォルトは30秒です。  
+  
+```swift
+
+provider.timeout = 5
+```  
+  
 ### LPLinkViewの生成  
   
 次に  
@@ -161,9 +176,7 @@ struct LinkPresentationView: UIViewRepresentable {
         self.fetchMetadata(for: url) { result in
             switch result {
             case .success(let metadata):
-                DispatchQueue.main.async {
-                    self.update(view: view, with: metadata)
-                }
+                self.update(view: view, with: metadata)
             case .failure:
                 let metadata = LPLinkMetadata()
                 metadata.title = "Error"
@@ -176,8 +189,10 @@ struct LinkPresentationView: UIViewRepresentable {
     }
 
     private func update(view: UIViewType, with metadata: LPLinkMetadata) {
-        view.metadata = metadata
-        view.sizeToFit()
+        DispatchQueue.main.async {
+            view.metadata = metadata
+            view.sizeToFit()
+        }
     }
 }
 ```  
@@ -197,8 +212,8 @@ struct LinkPresentationView: UIViewRepresentable {
 ```swift
 
 private func update(view: UIViewType, with metadata: LPLinkMetadata) {
-    ....
-    view.sizeToFit()
+      ....
+      view.sizeToFit()
 }
 ```  
   
@@ -369,6 +384,7 @@ final class MetaCache {
                 switch result {
                 case .success(let metadata):
                     MetaCache.shared.store(metadata)
+                    ...
                 case .failure:
                     ...
                 }
@@ -443,9 +459,7 @@ struct LinkPresentationView: UIViewRepresentable {
                 switch result {
                 case .success(let metadata):
                     MetaCache.shared.store(metadata)
-                    DispatchQueue.main.async {
-                        self.update(view: view, with: metadata)
-                    }
+                    self.update(view: view, with: metadata)
                 case .failure:
                     let metadata = LPLinkMetadata()
                     metadata.title = "Error"
@@ -476,10 +490,12 @@ struct LinkPresentationView: UIViewRepresentable {
     }
 
     private func update(view: UIViewType, with metadata: LPLinkMetadata) {
-        view.metadata = metadata
-        view.sizeToFit()
-        redraw.toggle()
-        view.isHidden = false
+        DispatchQueue.main.async {
+            view.metadata = metadata
+            view.sizeToFit()
+            self.redraw.toggle()
+            view.isHidden = false
+        }
     }
 }
 
@@ -511,55 +527,132 @@ struct LinkPresentationView_Previews: PreviewProvider {
 ```  
 </div></details>  
   
-## UIViewでの実装  
+## UIViewでの実装(検証中)  
   
 UITableViewでも実装をしてみました。  
   
-やっていることはだいたい同じなので  
-多くの部分は割愛しますが  
+LinkPresentationが  
+セルの再利用に対応していないというような記載は  
+いくつかのサイトで見ていました。  
   
-セルの実装でいくつか疑問に残っている部分があるので  
-記載します。  
+実際に色々とやってみて  
+何とか表示できることはできますが  
+色々とおかしな部分があるので検証中です。  
   
-まず`LPLinkView`は毎回生成しないと  
-画面に表示されないため  
-毎回`addSubView`をする必要がありました。  
-そのため`prepareForReuse`でsubviewsを一旦クリアする必要がありました。  
+セルの実装部分を記載します。  
   
-またセルサイズの再計算を行うために  
-メタ情報取得後にクロージャを実行しています。  
   
 ```swift
-
 final class Cell: UITableViewCell {
     static let identifier = "Cell"
+
+    private let activityIndicator = UIActivityIndicatorView()
+    private var linkView = LPLinkView()
+
+    // 再利用の際に繰り返しmetaDataを取得しないように設定
+    private var isFetching = false
 
     // ViewControllerにセルサイズを再計算をさせるためにLPLinkMetadata取得したことを伝える
     var onUpdate: (() -> Void)?
 
-    ...
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        setup()
+    }
 
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setup() {
+        contentView.addSubview(activityIndicator)
+        activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            activityIndicator.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            activityIndicator.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+    }
     // 毎回subViewをクリアする必要がある
     override func prepareForReuse() {
         super.prepareForReuse()
-        contentView.subviews.forEach { $0.removeFromSuperview() }
+        linkView.removeFromSuperview()
     }
 
     func configure(with url: URL) {
+        activityIndicator.startAnimating()
         setLPLinkView(for: url)
     }
 
+    private func setLPLinkView(for url: URL) {
+        if let cachedData = MetaCache.shared.metadata(for: url) {
+            linkView = LPLinkView(metadata: cachedData)
 
-    ...
+            addSubView(linkView: linkView)
+            linkView.sizeToFit()
 
-    private func update(_ view: LPLinkView, with metadata: LPLinkMetadata) {
-        view.metadata = metadata
-        // 毎回addSubViewする必要がある
-        addSubView(linkView: view)
-        view.sizeToFit()
+            onUpdate?()
 
-        // ViewControllerにLPLinkMetadataを取得したことを伝える
-        onUpdate?()
+            activityIndicator.stopAnimating()
+            return
+        }
+
+        fetchMetadata(for: url) { [weak self] result in
+            guard let self = self else {
+                return
+            }
+            self.linkView = LPLinkView(url: url)
+            switch result {
+            case .success(let metadata):
+                MetaCache.shared.store(metadata)
+                self.update(with: metadata)
+            case .failure(let error):
+                let errorMessage = error is LPError ? (error as! LPError).errorMessage : "error"
+                let metadata = LPLinkMetadata()
+                metadata.title = errorMessage
+                let url = URL(fileURLWithPath: Bundle.main.path(forResource: "error", ofType: "png")!)
+                metadata.iconProvider = NSItemProvider(contentsOf: url)
+                self.update(with: metadata)
+            }
+        }
+    }
+
+    private func fetchMetadata(for url: URL, completion: @escaping (Result<LPLinkMetadata, Error>) -> Void) {
+        if isFetching {
+            return
+        }
+        isFetching = true
+
+        let provider = LPMetadataProvider()
+        provider.startFetchingMetadata(for: url) { [weak self] metadata, error in
+            guard let self = self else {
+                return
+            }
+
+            if let error = error {
+                completion(.failure(error))
+            } else if let metadata = metadata {
+                completion(.success(metadata))
+            } else {
+                completion(.failure(LPError(.unknown)))
+            }
+            self.isFetching = false
+        }
+    }
+
+    private func update(with metadata: LPLinkMetadata) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                return
+            }
+
+            self.linkView.metadata = metadata
+            self.addSubView(linkView: self.linkView)
+            self.linkView.sizeToFit()
+
+            self.onUpdate?()
+
+            self.activityIndicator.stopAnimating()
+        }
     }
 
     private func addSubView(linkView: LPLinkView) {
@@ -577,10 +670,10 @@ final class Cell: UITableViewCell {
   
 下記のように動きます。  
   
-(表示時のアニメーションをどうにかしたいですが。。。)  
+データが少ないとうまく行っているように見えますが  
+データ量が多いと  
   
-  
-<blockquote class="twitter-tweet"><p lang="und" dir="ltr"><a href="https://t.co/EEhtCIHt6u">pic.twitter.com/EEhtCIHt6u</a></p>&mdash; shiz(しず) (@stzn3) <a href="https://twitter.com/stzn3/status/1241212431319191553?ref_src=twsrc%5Etfw">March 21, 2020</a></blockquote> <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>  
+<blockquote class="twitter-tweet"><p lang="und" dir="ltr"><a href="https://t.co/FzEsJhCt1l">pic.twitter.com/FzEsJhCt1l</a></p>&mdash; shiz(しず) (@stzn3) <a href="https://twitter.com/stzn3/status/1245518729946918912?ref_src=twsrc%5Etfw">April 2, 2020</a></blockquote> <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>  
   
   
 <details><summary>最終的なコード</summary><div>  
@@ -655,52 +748,86 @@ extension ViewController: UITableViewDataSource {
 final class Cell: UITableViewCell {
     static let identifier = "Cell"
 
+    private let activityIndicator = UIActivityIndicatorView()
+    private var linkView = LPLinkView()
+
+    private var isFetching = false
+
     var onUpdate: (() -> Void)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        setup()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    private func setup() {
+        contentView.addSubview(activityIndicator)
+        activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            activityIndicator.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            activityIndicator.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
-        contentView.subviews.forEach { $0.removeFromSuperview() }
+        linkView.removeFromSuperview()
     }
 
     func configure(with url: URL) {
+        activityIndicator.startAnimating()
         setLPLinkView(for: url)
     }
 
     private func setLPLinkView(for url: URL) {
-        let linkView = LPLinkView(url: url)
         if let cachedData = MetaCache.shared.metadata(for: url) {
-            update(linkView, with: cachedData)
+            linkView = LPLinkView(metadata: cachedData)
+
+            addSubView(linkView: linkView)
+            linkView.sizeToFit()
+
+            onUpdate?()
+
+            activityIndicator.stopAnimating()
             return
         }
-        fetchMetadata(for: url) { result in
+
+        fetchMetadata(for: url) { [weak self] result in
+            guard let self = self else {
+                return
+            }
+            self.linkView = LPLinkView(url: url)
             switch result {
             case .success(let metadata):
                 MetaCache.shared.store(metadata)
-                DispatchQueue.main.async {
-                    self.update(linkView, with: metadata)
-                }
-            case .failure:
+                self.update(with: metadata)
+            case .failure(let error):
+                let errorMessage = error is LPError ? (error as! LPError).errorMessage : "error"
                 let metadata = LPLinkMetadata()
-                metadata.title = "Error"
+                metadata.title = errorMessage
                 let url = URL(fileURLWithPath: Bundle.main.path(forResource: "error", ofType: "png")!)
                 metadata.iconProvider = NSItemProvider(contentsOf: url)
-                self.update(linkView, with: metadata)
+                self.update(with: metadata)
             }
         }
     }
 
     private func fetchMetadata(for url: URL, completion: @escaping (Result<LPLinkMetadata, Error>) -> Void) {
-        let provider = LPMetadataProvider()
+        if isFetching {
+            return
+        }
+        isFetching = true
 
-        provider.startFetchingMetadata(for: url) { metadata, error in
+        let provider = LPMetadataProvider()
+        provider.startFetchingMetadata(for: url) { [weak self] metadata, error in
+            guard let self = self else {
+                return
+            }
+
             if let error = error {
                 completion(.failure(error))
             } else if let metadata = metadata {
@@ -708,15 +835,24 @@ final class Cell: UITableViewCell {
             } else {
                 completion(.failure(LPError(.unknown)))
             }
+            self.isFetching = false
         }
     }
 
-    private func update(_ view: LPLinkView, with metadata: LPLinkMetadata) {
-        view.metadata = metadata
-        addSubView(linkView: view)
-        view.sizeToFit()
+    private func update(with metadata: LPLinkMetadata) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                return
+            }
 
-        onUpdate?()
+            self.linkView.metadata = metadata
+            self.addSubView(linkView: self.linkView)
+            self.linkView.sizeToFit()
+
+            self.onUpdate?()
+
+            self.activityIndicator.stopAnimating()
+        }
     }
 
     private func addSubView(linkView: LPLinkView) {
